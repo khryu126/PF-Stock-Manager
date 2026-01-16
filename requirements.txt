@@ -8,3 +8,4 @@ pandas
 scikit-learn
 streamlit-image-coordinates
 opencv-python-headless
+requests
