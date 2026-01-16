@@ -27,8 +27,14 @@ def load_data():
     # 특징 데이터 로드
     with open('material_features.pkl', 'rb') as f:
         db = pickle.load(f)
-    # 이미지 경로 CSV 로드
-    df_path = pd.read_csv('이미지경로.csv')
+    
+    # 이미지 경로 CSV 로드 (한글 인코딩 CP949 추가)
+    try:
+        df_path = pd.read_csv('이미지경로.csv', encoding='cp949')
+    except UnicodeDecodeError:
+        # 만약 파일이 UTF-8로 저장되어 있을 경우를 대비한 안전장치
+        df_path = pd.read_csv('이미지경로.csv', encoding='utf-8-sig')
+        
     return db, df_path
 
 res_model, dino_model = load_models()
@@ -97,3 +103,4 @@ if uploaded_file:
                     st.caption(f"(결 {s_res:.1%}, 구조 {s_dino:.1%})")
             else:
                 cols[i].warning(f"경로를 찾을 수 없음: {fname}")
+
