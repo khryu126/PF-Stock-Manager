@@ -6,7 +6,7 @@ import re
 import os
 import ssl
 import torch
-import torch.hub # [패치용]
+import torch.hub 
 import torchvision.transforms as T
 import cv2
 import requests
@@ -23,7 +23,7 @@ from streamlit_image_coordinates import streamlit_image_coordinates
 # [0] 환경 설정 및 토치 허브 버그 패치
 ssl._create_default_https_context = ssl._create_unverified_context
 
-# --- [1] 리소스 로드 (KeyError 방어 로직 추가) ---
+# --- [1] 리소스 로드 (KeyError 방어 및 메모리 최적화 유지) ---
 def get_direct_url(url):
     if not url or str(url) == 'nan' or 'drive.google.com' not in url: return url
     if 'file/d/' in url: file_id = url.split('file/d/')[1].split('/')[0]
@@ -53,34 +53,24 @@ def get_digits(text):
 
 @st.cache_resource
 def init_resources():
-    # 1. ResNet50 로드
     model_res = ResNet50(weights='imagenet', include_top=False, pooling='avg')
-    
-    # 2. DINOv2 로드 (KeyError 'Authorization' 방어 패치)
     try:
-        # 가짜 인증 헤더를 주입하여 torch.hub의 del 에러를 방지합니다.
         torch.hub._hub_conf_headers = {"Authorization": "token dummy"}
         model_dino = torch.hub.load('facebookresearch/dinov2', 'dinov2_vits14', trust_repo=True)
-    except Exception:
-        # 위 방법이 안 될 경우를 대비한 2차 방어
+    except:
         model_dino = torch.hub.load('facebookresearch/dinov2', 'dinov2_vits14')
-    
     model_dino.eval()
-    
     with open('material_features.pkl', 'rb') as f:
         feature_db = pickle.load(f)
-        
     df_path = load_csv_smart('이미지경로.csv')
     df_info = load_csv_smart('품목정보.csv')
     df_stock = load_csv_smart('현재고.csv')
-    
     agg_stock, stock_date = {}, "확인불가"
     if not df_stock.empty:
         df_stock['재고수량'] = pd.to_numeric(df_stock['재고수량'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
         df_stock['품번_KEY'] = df_stock['품번'].astype(str).str.strip().str.upper()
         agg_stock = df_stock.groupby('품번_KEY')['재고수량'].sum().to_dict()
         if '정산일자' in df_stock.columns: stock_date = str(int(df_stock['정산일자'].max()))
-            
     return model_res, model_dino, feature_db, df_path, df_info, agg_stock, stock_date
 
 res_model, dino_model, feature_db, df_path, df_info, agg_stock, stock_date = init_resources()
@@ -90,7 +80,7 @@ dino_transform = T.Compose([
     T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
 ])
 
-# --- [2] 이미지 처리 엔진 (90도 직각 회전 & 버튼 보정 유지) ---
+# --- [2] 이미지 처리 엔진 (버튼식 보정 유지) ---
 def apply_advanced_correction(img, state):
     img = ImageEnhance.Brightness(img).enhance(state['bri'])
     img = ImageEnhance.Contrast(img).enhance(state['con'])
@@ -121,7 +111,7 @@ def four_point_transform(image, pts):
     M = cv2.getPerspectiveTransform(rect, dst)
     return cv2.warpPerspective(image, M, (w, h), flags=cv2.INTER_LANCZOS4)
 
-# --- [3] Deco Finder v3.9.5 UI ---
+# --- [3] Deco Finder v3.9.6 UI ---
 st.set_page_config(layout="wide", page_title="Deco Finder")
 
 st.markdown("""
@@ -137,14 +127,16 @@ st.markdown("""
 
 st.title("Deco Finder")
 
+# 세션 초기화
 if 'adj_state' not in st.session_state:
     st.session_state['adj_state'] = {'bri': 1.0, 'con': 1.0, 'shp': 1.0, 'sat': 1.0, 'exp': 1.0, 'temp': 1.0, 'hue': 0}
+if 'last_mat' not in st.session_state: st.session_state['last_mat'] = "일반"
 if 'res_all' not in st.session_state: st.session_state.update({'res_all': [], 'res_stock': [], 'points': [], 'search_done': False, 'refresh_count': 0})
 
 if st.sidebar.button("🔄 전체 초기화", use_container_width=True):
     for key in list(st.session_state.keys()): del st.session_state[key]
     st.session_state['adj_state'] = {'bri': 1.0, 'con': 1.0, 'shp': 1.0, 'sat': 1.0, 'exp': 1.0, 'temp': 1.0, 'hue': 0}
-    st.session_state.update({'res_all': [], 'res_stock': [], 'points': [], 'search_done': False, 'refresh_count': 0})
+    st.session_state.update({'res_all': [], 'res_stock': [], 'points': [], 'search_done': False, 'refresh_count': 0, 'last_mat': '일반'})
     gc.collect(); st.rerun()
 
 st.sidebar.markdown(f"📦 **재고 정산일:** \n{stock_date}")
@@ -164,8 +156,8 @@ if uploaded:
             c_l, c_v, c_m, c_p = st.columns([2, 1, 1, 1])
             c_l.markdown(f"**{label}**")
             c_v.text(f"{st.session_state['adj_state'][key]:.1f}")
-            if c_m.button("➖", key=f"dec_{key}"): st.session_state['adj_state'][key] = max(0.1, st.session_state['adj_state'][key] - step); st.rerun()
-            if c_p.button("➕", key=f"inc_{key}"): st.session_state['adj_state'][key] += step; st.rerun()
+            if c_m.button("➖", key=f"dec_{key}"): st.session_state['adj_state'][key] = round(max(0.1, st.session_state['adj_state'][key] - step), 2); st.rerun()
+            if c_p.button("➕", key=f"inc_{key}"): st.session_state['adj_state'][key] = round(st.session_state['adj_state'][key] + step, 2); st.rerun()
         adj_btn("밝기", "bri", 0.1); adj_btn("대비", "con", 0.1); adj_btn("선명도", "shp", 0.5)
         adj_btn("채도", "sat", 0.1); adj_btn("노출", "exp", 0.1); adj_btn("온도", "temp", 0.1)
         if st.button("🔄 보정 초기화", use_container_width=True):
@@ -176,19 +168,29 @@ if uploaded:
     col_ui, col_pad = st.columns([1, 2])
     with col_ui:
         source_type = st.radio("출처", ['📸 촬영', '💻 디지털'], horizontal=True)
-        mat_type = st.selectbox("분류", ['일반', '우드', '유광', '패브릭', '석재'])
+        
+        # [수정] 자동 분류 보정 엔진 장착
+        mat_type = st.selectbox("분류 (선택 시 자동 보정)", ['일반', '우드', '유광', '패브릭', '석재'])
+        
+        # 분류 변경 감지 및 프리셋 적용 로직
+        if mat_type != st.session_state['last_mat']:
+            st.session_state['last_mat'] = mat_type
+            if mat_type == '우드': st.session_state['adj_state'].update({'con': 1.2, 'shp': 1.5, 'exp': 1.0})
+            elif mat_type == '유광': st.session_state['adj_state'].update({'con': 1.1, 'exp': 0.8, 'shp': 1.0})
+            elif mat_type == '석재': st.session_state['adj_state'].update({'shp': 2.0, 'con': 1.0, 'exp': 1.0})
+            elif mat_type == '패브릭': st.session_state['adj_state'].update({'con': 1.3, 'shp': 1.0, 'exp': 1.0})
+            else: st.session_state['adj_state'] = {'bri': 1.0, 'con': 1.0, 'shp': 1.0, 'sat': 1.0, 'exp': 1.0, 'temp': 1.0, 'hue': 0}
+            st.rerun()
+            
         s_mode = st.radio("분석 모드", ["종합(컬러+패턴)", "패턴 중심(흑백)"], horizontal=True)
         c_btn1, c_btn2 = st.columns(2)
         with c_btn1:
             if st.button("🔄 이미지 새로고침", use_container_width=True): 
-                st.session_state['refresh_count'] = time.time() 
-                st.rerun()
+                st.session_state['refresh_count'] = time.time(); st.rerun()
         with c_btn2:
-            # 시계방향 90도 직각 회전
             if st.button("↪️ 90도 회전", use_container_width=True):
                 st.session_state['proc_img'] = working_img.transpose(Image.ROTATE_270)
                 st.session_state['points'] = []; st.rerun()
-        
         if st.button("📍 점 다시찍기", use_container_width=True): st.session_state['points'] = []; st.rerun()
 
     with col_pad:
@@ -200,7 +202,6 @@ if uploaded:
             draw.text((px+12, py-12), str(i+1), fill='red')
         if len(st.session_state['points']) == 4:
             draw.polygon([tuple((p[0]*scale, p[1]*scale)) for p in st.session_state['points']], outline='#00FF00', width=3)
-        
         coords = streamlit_image_coordinates(d_img, key=f"deco_{st.session_state['refresh_count']}")
         if coords and len(st.session_state['points']) < 4:
             new_p = (coords['x']/scale, coords['y']/scale)
@@ -210,10 +211,10 @@ if uploaded:
     if len(st.session_state['points']) == 4:
         warped = four_point_transform(np.array(working_img), np.array(st.session_state['points'], dtype="float32"))
         final_img = Image.fromarray(warped)
+        # 자동+수정된 보정값 적용
         final_img = apply_advanced_correction(final_img, st.session_state['adj_state'])
         if "흑백" in s_mode: final_img = final_img.convert("L").convert("RGB")
         st.image(final_img, width=300, caption="분석 대상")
-        
         if st.button("🔍 Deco Finder 검색 시작", type="primary", use_container_width=True):
             with st.spinner('분석 중...'):
                 x_res = k_image.img_to_array(final_img.resize((224, 224))); q_res = res_model.predict(preprocess_input(np.expand_dims(x_res, axis=0)), verbose=0).flatten()
@@ -231,7 +232,7 @@ if uploaded:
                 st.session_state['res_all'] = results[:15]; st.session_state['res_stock'] = [r for r in results if r['stock'] > 0][:15]
                 gc.collect(); st.session_state['search_done'] = True; st.rerun()
 
-# --- [4] 결과 출력 (모바일 정렬 수정) ---
+# --- [4] 결과 출력 ---
 if st.session_state.get('search_done') and st.session_state.get('res_all'):
     st.markdown("---")
     tab1, tab2 = st.tabs(["📊 전체 결과", "✅ 재고 보유"])
