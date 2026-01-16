@@ -1,0 +1,7 @@
+streamlit
+tensorflow-cpu
+torch
+torchvision
+pillow
+numpy
+scikit-learn
