@@ -23,7 +23,7 @@ from streamlit_image_coordinates import streamlit_image_coordinates
 # [0] 환경 설정 및 토치 허브 버그 패치
 ssl._create_default_https_context = ssl._create_unverified_context
 
-# --- [1] 리소스 로드 (KeyError 방어 및 메모리 최적화 유지) ---
+# --- [1] 리소스 로드 (하이브리드 엔진 유지) ---
 def get_direct_url(url):
     if not url or str(url) == 'nan' or 'drive.google.com' not in url: return url
     if 'file/d/' in url: file_id = url.split('file/d/')[1].split('/')[0]
@@ -53,6 +53,7 @@ def get_digits(text):
 
 @st.cache_resource
 def init_resources():
+    # Pro 버전: ResNet50 + DINOv2 하이브리드 로드
     model_res = ResNet50(weights='imagenet', include_top=False, pooling='avg')
     try:
         torch.hub._hub_conf_headers = {"Authorization": "token dummy"}
@@ -60,17 +61,21 @@ def init_resources():
     except:
         model_dino = torch.hub.load('facebookresearch/dinov2', 'dinov2_vits14')
     model_dino.eval()
+    
     with open('material_features.pkl', 'rb') as f:
         feature_db = pickle.load(f)
+        
     df_path = load_csv_smart('이미지경로.csv')
     df_info = load_csv_smart('품목정보.csv')
     df_stock = load_csv_smart('현재고.csv')
+    
     agg_stock, stock_date = {}, "확인불가"
     if not df_stock.empty:
         df_stock['재고수량'] = pd.to_numeric(df_stock['재고수량'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
         df_stock['품번_KEY'] = df_stock['품번'].astype(str).str.strip().str.upper()
         agg_stock = df_stock.groupby('품번_KEY')['재고수량'].sum().to_dict()
         if '정산일자' in df_stock.columns: stock_date = str(int(df_stock['정산일자'].max()))
+            
     return model_res, model_dino, feature_db, df_path, df_info, agg_stock, stock_date
 
 res_model, dino_model, feature_db, df_path, df_info, agg_stock, stock_date = init_resources()
@@ -111,7 +116,7 @@ def four_point_transform(image, pts):
     M = cv2.getPerspectiveTransform(rect, dst)
     return cv2.warpPerspective(image, M, (w, h), flags=cv2.INTER_LANCZOS4)
 
-# --- [3] Deco Finder v3.9.6 UI ---
+# --- [3] Deco Finder v3.9.7 UI ---
 st.set_page_config(layout="wide", page_title="Deco Finder")
 
 st.markdown("""
@@ -127,7 +132,6 @@ st.markdown("""
 
 st.title("Deco Finder")
 
-# 세션 초기화
 if 'adj_state' not in st.session_state:
     st.session_state['adj_state'] = {'bri': 1.0, 'con': 1.0, 'shp': 1.0, 'sat': 1.0, 'exp': 1.0, 'temp': 1.0, 'hue': 0}
 if 'last_mat' not in st.session_state: st.session_state['last_mat'] = "일반"
@@ -168,29 +172,31 @@ if uploaded:
     col_ui, col_pad = st.columns([1, 2])
     with col_ui:
         source_type = st.radio("출처", ['📸 촬영', '💻 디지털'], horizontal=True)
-        
-        # [수정] 자동 분류 보정 엔진 장착
         mat_type = st.selectbox("분류 (선택 시 자동 보정)", ['일반', '우드', '유광', '패브릭', '석재'])
         
-        # 분류 변경 감지 및 프리셋 적용 로직
         if mat_type != st.session_state['last_mat']:
             st.session_state['last_mat'] = mat_type
-            if mat_type == '우드': st.session_state['adj_state'].update({'con': 1.2, 'shp': 1.5, 'exp': 1.0})
-            elif mat_type == '유광': st.session_state['adj_state'].update({'con': 1.1, 'exp': 0.8, 'shp': 1.0})
-            elif mat_type == '석재': st.session_state['adj_state'].update({'shp': 2.0, 'con': 1.0, 'exp': 1.0})
-            elif mat_type == '패브릭': st.session_state['adj_state'].update({'con': 1.3, 'shp': 1.0, 'exp': 1.0})
+            if mat_type == '우드': st.session_state['adj_state'].update({'con': 1.2, 'shp': 1.5})
+            elif mat_type == '유광': st.session_state['adj_state'].update({'con': 1.1, 'exp': 0.8})
+            elif mat_type == '석재': st.session_state['adj_state'].update({'shp': 2.0})
+            elif mat_type == '패브릭': st.session_state['adj_state'].update({'con': 1.3})
             else: st.session_state['adj_state'] = {'bri': 1.0, 'con': 1.0, 'shp': 1.0, 'sat': 1.0, 'exp': 1.0, 'temp': 1.0, 'hue': 0}
             st.rerun()
             
         s_mode = st.radio("분석 모드", ["종합(컬러+패턴)", "패턴 중심(흑백)"], horizontal=True)
         c_btn1, c_btn2 = st.columns(2)
         with c_btn1:
-            if st.button("🔄 이미지 새로고침", use_container_width=True): 
+            if st.button("🔄 새로고침", use_container_width=True): 
                 st.session_state['refresh_count'] = time.time(); st.rerun()
         with c_btn2:
             if st.button("↪️ 90도 회전", use_container_width=True):
                 st.session_state['proc_img'] = working_img.transpose(Image.ROTATE_270)
                 st.session_state['points'] = []; st.rerun()
+        
+        # [신규 추가] ⏹️ 전체 선택 버튼
+        if st.button("⏹️ 전체 선택", use_container_width=True, type="secondary"):
+            st.session_state['points'] = [(0, 0), (w, 0), (w, h), (0, h)]; st.rerun()
+            
         if st.button("📍 점 다시찍기", use_container_width=True): st.session_state['points'] = []; st.rerun()
 
     with col_pad:
@@ -211,7 +217,6 @@ if uploaded:
     if len(st.session_state['points']) == 4:
         warped = four_point_transform(np.array(working_img), np.array(st.session_state['points'], dtype="float32"))
         final_img = Image.fromarray(warped)
-        # 자동+수정된 보정값 적용
         final_img = apply_advanced_correction(final_img, st.session_state['adj_state'])
         if "흑백" in s_mode: final_img = final_img.convert("L").convert("RGB")
         st.image(final_img, width=300, caption="분석 대상")
@@ -222,6 +227,7 @@ if uploaded:
                 with torch.no_grad(): q_dino = dino_model(d_in).cpu().numpy().flatten()
                 results = []
                 for fn, db_vec in feature_db.items():
+                    # 하이브리드 점수 연산 (60% ResNet + 40% DINOv2)
                     score = (cosine_similarity([q_res], [db_vec[:2048]])[0][0] * 0.6) + (cosine_similarity([q_dino], [db_vec[2048:]])[0][0] * 0.4)
                     d_key = get_digits(fn); match_info = df_info[df_info['상품코드'].apply(get_digits) == d_key]
                     f_code = match_info.iloc[0]['상품코드'] if not match_info.empty else fn.split('.')[0]
@@ -255,6 +261,5 @@ if st.session_state.get('search_done') and st.session_state.get('res_all'):
                             b64 = get_image_as_base64(item['url'])
                             if b64: st.image(b64, use_container_width=True)
                             st.write(f"**품명:** {item['name']}")
-
     with tab1: display_grid(st.session_state['res_all'])
     with tab2: display_grid(st.session_state['res_stock'])
