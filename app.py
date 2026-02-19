@@ -5,49 +5,44 @@ from datetime import datetime
 import io
 
 # --- 1. 페이지 설정 ---
-st.set_page_config(page_title="성지라미텍 특판 오더 관리 시스템", layout="wide")
+st.set_page_config(page_title="성지라미텍 특판 오더 집중 관리", layout="wide")
 
 # --- 2. 유틸리티 함수 (숫자 변환 및 파일 식별) ---
 
 def to_num_series(series):
-    """Pandas Series 전체를 숫자로 안전하게 변환 (쉼표 제거 포함)"""
-    return pd.to_numeric(series.astype(str).str.replace(',', '').str.strip(), errors='coerce').fillna(0.0)
+    """표 전체를 숫자로 안전하게 변환 (쉼표 제거 포함)"""
+    if series is None or series.empty:
+        return pd.Series(0.0)
+    s = series.astype(str).str.replace(',', '').str.replace(' ', '').str.strip()
+    return pd.to_numeric(s, errors='coerce').fillna(0.0)
 
 def identify_data(uploaded_files):
-    """파일명 무관, 컬럼명을 분석해 데이터를 자동 분류"""
+    """파일명 무관하게 컬럼명을 분석해 데이터 자동 분류"""
     data_map = {}
     for file in uploaded_files:
         identified = False
         for enc in ['cp949', 'utf-8-sig', 'utf-8']:
             if identified: break
-            for sr in [0, 1, 2]: # 최대 2줄까지 건너뛰며 헤더 찾기
+            for sr in [0, 1, 2]: # 최대 2줄 건너뜀
                 try:
                     file.seek(0)
                     temp_df = pd.read_csv(file, encoding=enc, skiprows=sr)
-                    # 앞뒤 공백 제거 및 첫 번째 Unnamed 컬럼(순번) 제거 시도
-                    temp_df.columns = temp_df.columns.str.strip()
-                    if temp_df.columns[0].startswith('Unnamed'):
-                        temp_df = temp_df.iloc[:, 1:]
+                    temp_df.columns = temp_df.columns.astype(str).str.strip()
+                    cols = " ".join(temp_df.columns)
                     
-                    cols = " ".join(temp_df.columns.astype(str))
-                    
-                    # 1. 수주예정등록 (상품코드, 수주잔량, 납품예정일)
-                    if '수주잔량' in cols and ('상품코드' in cols or '품번' in cols):
+                    # 식별 로직
+                    if '수주잔량' in cols and '납품예정일' in cols:
                         data_map['exp'] = temp_df
                         identified = True; break
-                    # 2. 현재고 (품번, 재고수량)
-                    elif '재고수량' in cols and '품번' in cols:
+                    elif '재고수량' in cols and '현재고액' in cols:
                         data_map['stk'] = temp_df
                         identified = True; break
-                    # 3. PO (품번, PO 수량)
-                    elif 'PO 수량' in cols and '품번' in cols:
+                    elif 'PO 수량' in cols or 'PO잔량' in cols:
                         data_map['po'] = temp_df
                         identified = True; break
-                    # 4. 품목정보 (상품코드, B/P무게)
                     elif 'B/P무게' in cols or 'B/P weight' in cols:
                         data_map['itm'] = temp_df
                         identified = True; break
-                    # 5. 시판스펙관리 (품번, 4개월판매량)
                     elif '4개월판매량' in cols:
                         data_map['rtl'] = temp_df
                         identified = True; break
@@ -57,14 +52,14 @@ def identify_data(uploaded_files):
 
 # --- 3. 메인 화면 ---
 
-st.title("📊 특판 모양지 통합 오더 관리 대시보드")
-st.sidebar.header("📁 데이터 업로드")
-uploaded_files = st.sidebar.file_uploader("관련 CSV 파일들을 한꺼번에 선택해 주세요", type="csv", accept_multiple_files=True)
+st.title("📦 특판 모양지 오더 집중 관리 대시보드")
+st.sidebar.header("📁 데이터 통합 업로드")
+files = st.sidebar.file_uploader("관련 CSV 파일들을 모두 선택해 주세요", type="csv", accept_multiple_files=True)
 
-if uploaded_files:
-    data = identify_data(uploaded_files)
+if files:
+    data = identify_data(files)
     
-    # 필수 파일(수주, 재고) 확인
+    # 필수 파일(수주, 재고) 체크
     if 'exp' in data and 'stk' in data:
         df_exp = data['exp']
         df_stk = data['stk']
@@ -72,67 +67,64 @@ if uploaded_files:
         df_itm = data.get('itm')
         df_rtl = data.get('rtl')
         
-        # 컬럼명 표준화 (상품코드/품번 혼용 대응)
+        # 컬럼 표준화
         exp_item_col = '상품코드' if '상품코드' in df_exp.columns else '품번'
+        stk_item_col = '품번' if '품번' in df_stk.columns else '상품코드'
+        
+        # 1단계: 유 대리님 요청대로 '수주잔량이 0보다 큰' 품번만 필터링
+        df_exp['수주잔량_n'] = to_num_series(df_exp['수주잔량'])
+        active_items = df_exp[df_exp['수주잔량_n'] > 0][exp_item_col].unique()
+        
+        st.sidebar.success(f"분석 대상: {len(active_items)}개 품번 (잔량 보유 건)")
         
         # 분석 설정
-        st.sidebar.divider()
-        unit = st.sidebar.radio("🗓️ 분석 단위 선택", ["월별", "분기별"])
-        months_to_show = st.sidebar.slider("분석 기간(개월)", 6, 24, 12)
+        unit = st.sidebar.radio("🗓️ 분석 단위", ["월별", "분기별"])
+        period_count = st.sidebar.slider("분석 기간", 6, 24, 12)
         
-        # 데이터 수치화
-        df_exp['수주잔량_n'] = to_num_series(df_exp['수주잔량'])
-        df_stk['재고수량_n'] = to_num_series(df_stk['재고수량'])
-        
-        # 평량 매핑
+        # 평량 맵 구축
         weight_map = {}
         if df_itm is not None:
-            itm_code_col = '상품코드' if '상품코드' in df_itm.columns else '품번'
+            itm_id = '상품코드' if '상품코드' in df_itm.columns else '품번'
             w_col = 'B/P무게' if 'B/P무게' in df_itm.columns else 'B/P weight'
-            weight_map = df_itm.set_index(itm_code_col)[w_col].to_dict()
+            weight_map = df_itm.set_index(itm_id)[w_col].to_dict()
 
-        # 분석 대상 품번 (수주잔량이 있는 모든 품번)
-        all_items = df_exp[df_exp['수주잔량_n'] > 0][exp_item_col].unique()
-        
         # 기간 생성
         start_date = datetime.now().replace(day=1)
         if unit == "월별":
-            periods = [(start_date + pd.DateOffset(months=i)).strftime("%Y-%m") for i in range(months_to_show)]
+            periods = [(start_date + pd.DateOffset(months=i)).strftime("%Y-%m") for i in range(period_count)]
         else:
-            # 분기별 (현재 분기부터 시작)
-            periods = []
-            for i in range(months_to_show // 3):
-                target_date = start_date + pd.DateOffset(months=i*3)
-                periods.append(f"{target_date.year} Q{(target_date.month-1)//3 + 1}")
+            periods = [f"{(start_date + pd.DateOffset(months=i*3)).year} Q{((start_date + pd.DateOffset(months=i*3)).month-1)//3 + 1}" for i in range(period_count // 3)]
         
-        matrix_data = []
+        matrix_rows = []
 
-        for item in all_items:
-            # 기본 정보
-            item_name = df_exp[df_exp[exp_item_col] == item]['상품명'].iloc[0] if '상품명' in df_exp.columns else "알수없음"
-            bw = weight_map.get(item, 70.0)
-            bw = float(bw) if str(bw).replace('.','').isdigit() else 70.0
+        for item in active_items:
+            # 품명 및 기본 정보
+            item_df = df_exp[df_exp[exp_item_col] == item]
+            item_name = item_df['상품명'].iloc[0] if not item_df.empty and '상품명' in item_df.columns else "이름없음"
             
-            # 1. 초기 가용 재고 (현재고 + PO환산)
-            inv_m = to_num_series(df_stk[df_stk['품번'] == item]['재고수량_n']).sum()
-            if df_po is not None:
+            bw = weight_map.get(item, 70.0)
+            try: bw = float(bw) if float(bw) > 0 else 70.0
+            except: bw = 70.0
+            
+            # 현재 가용량 (현재고 + PO)
+            inv_m = to_num_series(df_stk[df_stk[stk_item_col] == item]['재고수량']).sum()
+            if df_po is not None and 'PO 수량' in df_po.columns:
                 po_kg = to_num_series(df_po[df_po['품번'] == item]['PO 수량']).sum()
                 inv_m += (po_kg * 1000) / (bw * 1.26)
             
-            # 2. 시판 월 소요량
+            # 시판 월 수요
             rtl_m = 0
-            if df_rtl is not None:
+            if df_rtl is not None and '4개월판매량' in df_rtl.columns:
                 rtl_m = to_num_series(df_rtl[df_rtl['품번'] == item]['4개월판매량']).sum() / 4
             
-            # 3. 특판 수요 배분 (납품예정일 기준)
+            # 특판 납기 배분
             item_exp = df_exp[df_exp[exp_item_col] == item].copy()
             item_exp['date'] = pd.to_datetime(item_exp['납품예정일'].astype(str), errors='coerce')
             
-            row_cons = {"품번": item, "상품명": item_name, "구분": "예상소요량(m)"}
-            row_inv = {"품번": item, "상품명": item_name, "구분": "예상재고량(m)"}
+            row_demand = {"품번": item, "상품명": item_name, "구분": "소요량(m)"}
+            row_stock = {"품번": item, "상품명": item_name, "구분": "예상재고(m)"}
             
-            current_running_inv = inv_m
-            
+            balance = inv_m
             for p in periods:
                 if unit == "월별":
                     p_start = datetime.strptime(p, "%Y-%m")
@@ -140,45 +132,36 @@ if uploaded_files:
                     spec_m = item_exp[(item_exp['date'] >= p_start) & (item_exp['date'] < p_end)]['수주잔량_n'].sum()
                     total_m = spec_m + rtl_m
                 else:
-                    # 분기별 합산
-                    q_year = int(p.split(' ')[0])
-                    q_num = int(p.split('Q')[1])
-                    p_start = datetime(q_year, (q_num-1)*3 + 1, 1)
+                    y, q = int(p.split(' ')[0]), int(p.split('Q')[1])
+                    p_start = datetime(y, (q-1)*3 + 1, 1)
                     p_end = p_start + pd.DateOffset(months=3)
                     spec_m = item_exp[(item_exp['date'] >= p_start) & (item_exp['date'] < p_end)]['수주잔량_n'].sum()
                     total_m = spec_m + (rtl_m * 3)
                 
-                current_running_inv -= total_m
-                row_cons[p] = round(total_m)
-                row_inv[p] = round(current_running_inv)
+                balance -= total_m
+                row_demand[p] = round(total_m)
+                row_stock[p] = round(balance)
             
-            matrix_data.append(row_cons)
-            matrix_data.append(row_inv)
+            matrix_rows.append(row_demand)
+            matrix_rows.append(row_stock)
 
-        # 결과 테이블화
-        result_df = pd.DataFrame(matrix_data)
+        # 결과 렌더링
+        final_df = pd.DataFrame(matrix_rows)
 
-        # 음영 스타일 함수
-        def color_inventory(val):
+        def style_fn(val):
             if isinstance(val, (int, float, np.integer, np.floating)):
-                if val < 0: return 'background-color: #ffcccc; color: #990000; font-weight: bold;' # 재고부족 빨강
-                return 'background-color: #e6ffed; color: #006600;' # 재고있음 초록
+                if val < 0: return 'background-color: #ffcccc; color: #990000; font-weight: bold;'
+                return 'background-color: #e6ffed; color: #006600;'
             return ''
 
-        st.subheader(f"📅 품번별 {unit} 통합 재고 수지 (현재고 + PO 포함)")
-        st.dataframe(
-            result_df.style.applymap(color_inventory, subset=periods),
-            use_container_width=True,
-            height=600
-        )
+        st.subheader(f"📅 품번별 {unit} 오더 검토 매트릭스")
+        st.dataframe(final_df.style.applymap(style_fn, subset=periods), use_container_width=True, height=600)
         
-        st.success("✅ 분석 완료! 빨간색으로 표시된 시점은 재고 부족이 예상되므로 발주가 필요합니다.")
-        
-        # 다운로드
-        csv = result_df.to_csv(index=False).encode('utf-8-sig')
-        st.download_button("📥 분석 결과 다운로드 (CSV)", csv, f"special_order_report_{datetime.now().strftime('%Y%m%d')}.csv", "text/csv")
+        st.info("💡 빨간색 칸: 재고 고갈 시점입니다. 최소 4개월 전(독일 리드타임)에 오더를 검토하세요.")
+        csv = final_df.to_csv(index=False).encode('utf-8-sig')
+        st.download_button("📥 결과 다운로드 (CSV)", csv, f"order_plan_{datetime.now().strftime('%m%d')}.csv", "text/csv")
 
     else:
-        st.warning("⚠️ '수주예정등록'과 '현재고' 파일이 인식되지 않았습니다. 파일 안의 컬럼명을 확인해 주세요.")
+        st.warning("⚠️ '수주예정등록'과 '현재고' 파일이 필요합니다. 컬럼명을 확인해 주세요.")
 else:
-    st.info("👈 왼쪽 사이드바에 분석할 CSV 파일들을 모두 올려주세요. (파일명은 상관없습니다)")
+    st.info("👈 왼쪽에서 분석할 파일들을 한꺼번에 올려주세요.")
