@@ -11,7 +11,7 @@ LT_CONFIG = {
     'SE': {'total': 6, 'ship_days': 90},
     'SRL': {'total': 8, 'ship_days': 90},
     'SP': {'total': 8, 'ship_days': 90},
-    'SH': {'total': 1, 'ship_days': 30}, # 상해 1개월
+    'SH': {'total': 1, 'ship_days': 30},
     'KD': {'total': 2, 'ship_days': 30},
     'QZ': {'total': 2, 'ship_days': 30}
 }
@@ -32,14 +32,12 @@ def smart_load_csv(file):
         try:
             file.seek(0)
             df = pd.read_csv(file, encoding=enc)
-            # 불필요한 빈 행/열 제거
             df = df.dropna(how='all', axis=0).dropna(how='all', axis=1)
             return df
         except: continue
     return None
 
 def find_col(df, keywords):
-    """키워드 리스트를 순회하며 데이터프레임에서 가장 적절한 컬럼명을 반환"""
     for k in keywords:
         for col in df.columns:
             if k in str(col).replace(" ", ""):
@@ -59,7 +57,16 @@ def show_detail_popup(group_ids, df_bl, cutoff_date):
     st.dataframe(detail.sort_values('dt_clean', ascending=True), use_container_width=True, hide_index=True)
 
 # --- [4. 메인 UI] ---
-st.title("🚀 P·Forecast Stock Manager v5.6")
+st.title("🚀 P·Forecast Stock Manager v5.7")
+
+# 파일 인식 사전 (상태 표시용)
+RECOGNITION = {
+    "backlog": {"name": "수주예정(Demand)", "keys": ["수주잔량", "총예상수량"], "found": False},
+    "po": {"name": "구매발주(PO)", "keys": ["PO잔량", "미선적"], "found": False},
+    "stock": {"name": "현재고(Stock)", "keys": ["재고수량", "현재고액"], "found": False},
+    "item": {"name": "품목정보(Master)", "keys": ["최종생산지", "이전상품코드"], "found": False},
+    "retail": {"name": "시판스펙(Retail)", "keys": ["출시예정", "4개월판매량"], "found": False}
+}
 
 with st.sidebar:
     st.header("⚙️ 분석 설정")
@@ -70,15 +77,11 @@ with st.sidebar:
     st.markdown("---")
     search_query = st.text_input("🔍 키워드 검색 (품명/품번)", "")
     st.markdown("---")
+    st.subheader("📁 파일 로드 상태")
     uploaded_files = st.file_uploader("5종 CSV 파일 업로드", accept_multiple_files=True)
 
-# 파일 로딩
+# 데이터 로딩 및 상태 업데이트
 data = {}
-RECOGNITION = {
-    "backlog": ["수주잔량", "총예상수량"], "po": ["PO잔량", "미선적"],
-    "stock": ["재고수량", "현재고액"], "item": ["최종생산지", "이전상품코드"],
-    "retail": ["출시예정", "4개월판매량"]
-}
 if uploaded_files:
     for f in uploaded_files:
         df = smart_load_csv(f)
@@ -86,18 +89,26 @@ if uploaded_files:
             df.columns = [str(c).strip() for c in df.columns]
             cols_text = "|".join(df.columns)
             for k, v in RECOGNITION.items():
-                if any(key in cols_text for key in v):
-                    data[k] = df; break
+                if any(key in cols_text for key in v["keys"]):
+                    data[k] = df
+                    RECOGNITION[k]["found"] = True
+                    break
+
+# 사이드바에 업로드 리스트 표시 (복구된 부분)
+with st.sidebar:
+    for k, v in RECOGNITION.items():
+        if v["found"]:
+            st.success(f"✅ {v['name']} (업로드 완료)")
+        else:
+            st.warning(f"⏳ {v['name']} (업로드 대기중)")
 
 # --- [5. 메인 분석 로직] ---
 if len(data) >= 5:
     with st.spinner('품번 그룹화 및 수급 시뮬레이션 중...'):
         df_item, df_bl, df_po, df_st, df_retail = data['item'], data['backlog'], data['po'], data['stock'], data['retail']
-        
         today_dt = pd.Timestamp(datetime.now().date())
         base_dt = pd.Timestamp(start_date_val)
 
-        # 컬럼명 자동 매핑
         it_code = find_col(df_item, ['상품코드', '품번'])
         it_site = find_col(df_item, ['최종생산지'])
         it_prev = find_col(df_item, ['이전상품코드'])
@@ -114,26 +125,21 @@ if len(data) >= 5:
         st_code = find_col(df_st, ['품번', '상품코드'])
         st_qty = find_col(df_st, ['재고수량', '현재고'])
 
-        # 1. 마스터 정보 딕셔너리화 (이름 기반)
         master_info = df_item.set_index(df_item[it_code].astype(str).str.strip())
         site_map = master_info[it_site].to_dict()
         prev_map = master_info[it_prev].to_dict()
-        # '다음 품번' 찾기용 맵 (이전코드를 키로 사용)
         next_map = df_item.set_index(df_item[it_prev].astype(str).str.strip())[it_code].to_dict()
 
-        # 2. 데이터 정제
         df_bl['clean_qty'] = clean_numeric(df_bl[bl_qty])
         df_bl['dt_clean'] = parse_date_smart(df_bl[bl_date])
         df_bl = df_bl[df_bl['dt_clean'] >= cutoff_date].copy()
 
-        df_po['m_qty'] = clean_numeric(df_po[po_qty]) * 11.3378 # KG -> M 환산
+        df_po['m_qty'] = clean_numeric(df_po[po_qty]) * 11.3378 
 
-        def get_arrival_v56(row):
+        def get_arrival_v57(row):
             pid = str(row[po_code]).strip()
-            # 생산지 조회 (PO에 없으면 마스터에서)
             site_raw = str(row.get('생산지명', site_map.get(pid, 'ETC'))).upper()
             lt = LT_CONFIG.get(site_raw[:2], {'total': 0, 'ship_days': 0})
-            
             p_dt = parse_date_smart(pd.Series([row.get(po_prod, np.nan)]))[0]
             if pd.notnull(p_dt):
                 return p_dt + timedelta(days=int(lt['ship_days']))
@@ -142,10 +148,9 @@ if len(data) >= 5:
                 if pd.isna(b_dt): b_dt = today_dt
                 return b_dt + relativedelta(months=int(lt['total']))
 
-        df_po['dt_arrival'] = df_po.apply(get_arrival_v56, axis=1)
+        df_po['dt_arrival'] = df_po.apply(get_arrival_v57, axis=1)
         df_st['clean_qty'] = clean_numeric(df_st[st_qty])
 
-        # 3. 매트릭스 생성
         freq_map = {"주별": "W", "월별": "MS", "분기별": "QS", "년도별": "YS"}
         date_range = pd.date_range(start=base_dt, periods=13, freq=freq_map[freq_opt])
         time_labels = [d.strftime('%Y-%m-%d' if freq_opt=="주별" else '%Y-%m') for d in date_range[:12]]
@@ -160,25 +165,24 @@ if len(data) >= 5:
             p_name = str(item_match['상품명'].iloc[0]) if not item_match.empty else "-"
             if search_query and (search_query.lower() not in p_name.lower() and search_query.lower() not in pid_s.lower()): continue
 
-            # 그룹핑 (이전/현재/다음)
-            prev_id = str(prev_map.get(pid_s, ""))
-            next_id = str(next_map.get(pid_s, ""))
-            group = list(set([pid_s, prev_id, next_id]))
-            group = [g for g in group if g and g not in ["nan", "0", "-", "None"]]
+            prev_id = str(prev_map.get(pid_s, "nan"))
+            prev_id = "" if prev_id in ["nan", "None", "0", "-"] else prev_id
+            next_id = str(next_map.get(pid_s, "nan"))
+            next_id = "" if next_id in ["nan", "None", "0", "-"] else next_id
 
+            group = list(set([pid_s, prev_id, next_id])); group = [g for g in group if g]
             site_name = str(site_map.get(pid_s, "ETC"))
             lt_total = LT_CONFIG.get(site_name[:2].upper(), {'total': 0})['total']
-            
-            # 수지 계산
+            is_retail = " 🏷️" if any(str(g) in df_retail.iloc[:, 8].astype(str).values for g in group) else ""
+
             main_stk = df_st[df_st[st_code].astype(str).str.strip().isin(group)]['clean_qty'].sum()
-            gap_po = df_po[(df_po[po_code].astype(str).str.strip().isin(group)) & 
-                           (df_po['dt_arrival'] >= today_dt) & (df_po['dt_arrival'] < base_dt)]['m_qty'].sum()
+            gap_po = df_po[(df_po[po_code].astype(str).str.strip().isin(group)) & (df_po['dt_arrival'] >= today_dt) & (df_po['dt_arrival'] < base_dt)]['m_qty'].sum()
             total_stk = main_stk + gap_po
             
             overdue_dem = df_bl[(df_bl[bl_code].astype(str).str.strip().isin(group)) & (df_bl['dt_clean'] < base_dt)]['clean_qty'].sum()
             running_inv = total_stk - overdue_dem
             
-            d_row = {"No": idx_no, "품명": p_name, "수주품번": pid_s, "본사재고": total_stk, "PO잔량(m)": df_po[df_po[po_code].astype(str).str.strip().isin(group)]['m_qty'].sum(), "생산지": f"{site_name[:2]}({lt_total}M)", "구분": "소요량", "연계정보": f"이전:{prev_id}" if prev_id else "", "납기경과": overdue_dem, "group": group}
+            d_row = {"No": idx_no, "품명": p_name, "수주품번": pid_s + is_retail, "본사재고": total_stk, "PO잔량(m)": df_po[df_po[po_code].astype(str).str.strip().isin(group)]['m_qty'].sum(), "생산지": f"{site_name[:2]}({lt_total}M)", "구분": "소요량", "연계정보": f"이전:{prev_id}" if prev_id else "", "납기경과": overdue_dem, "group": group}
             p_row = {"No": idx_no, "품명": "", "수주품번": "", "본사재고": np.nan, "PO잔량(m)": np.nan, "생산지": "", "구분": "입고량(PO)", "연계정보": "", "납기경과": gap_po, "group": group}
             s_row = {"No": idx_no, "품명": "", "수주품번": "", "본사재고": np.nan, "PO잔량(m)": np.nan, "생산지": "", "구분": "예상재고", "연계정보": f"변경:{next_id}" if next_id else "", "납기경과": running_inv, "group": group}
 
@@ -208,10 +212,19 @@ if len(data) >= 5:
                     if row[col] < 0: styles[i] = 'background-color: #ff4b4b; color: white'
             return styles
 
+        if alert_list:
+            if st.button(f"⚠️ 긴급 발주 검토 대상 ({len(pd.DataFrame(alert_list)['품번'].unique())}건)"):
+                st.table(pd.DataFrame(alert_list).drop_duplicates(subset=['품번'], keep='first').style.format({"부족수량": "{:,.0f}"}))
+
         st.subheader(f"📊 수급 분석 매트릭스 ({freq_opt})")
-        st.dataframe(
+        st_df = st.dataframe(
             res_df.style.apply(style_fn, axis=1).format({c: "{:,.0f}" for c in num_cols}, na_rep=""),
             use_container_width=True, hide_index=True,
             column_order=["No", "품명", "수주품번", "본사재고", "PO잔량(m)", "생산지", "연계정보", "구분", "납기경과"] + time_labels,
             on_select="rerun", selection_mode="single-row"
         )
+        if st_df.selection.rows:
+            s_idx = st_df.selection.rows[0]
+            target = res_df.iloc[s_idx - (s_idx % 3)]
+            if st.button(f"🔍 {target['수주품번'].replace('🏷️','').strip()} 상세 보기"):
+                show_detail_popup(target['group'], df_bl, cutoff_date)
