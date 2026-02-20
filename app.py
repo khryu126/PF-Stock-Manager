@@ -8,22 +8,29 @@ st.set_page_config(page_title="P·Forecast Stock Manager", layout="wide")
 
 LT_MASTER = {'SH': 1, 'KD': 2, 'QZ': 2, 'SE': 6, 'SRL': 8, 'SP': 8}
 
-# --- [2. 유틸리티 함수] ---
+# --- [2. 데이터 정제 유틸리티] ---
 def clean_numeric(series):
-    """숫자 정제: 콤마 제거 및 NaN 0 처리"""
+    """문자열 숫자(콤마 포함)를 실수형으로 변환"""
     if series.dtype == 'object':
         series = series.astype(str).str.replace(',', '').str.replace('"', '').str.strip()
         series = series.replace(['', 'nan', 'None'], np.nan)
     return pd.to_numeric(series, errors='coerce').fillna(0)
 
+def parse_date_smart(series):
+    """20260101(숫자/문자) 형식을 datetime으로 완벽하게 변환"""
+    # 1. 공백 제거 및 문자열화
+    s = series.astype(str).str.replace('.0', '', regex=False).str.strip()
+    # 2. 8자리 숫자인 경우 형식 지정 변환
+    return pd.to_datetime(s, format='%Y%m%d', errors='coerce')
+
 def smart_load_csv(file):
-    """인코딩 및 빈 줄 대응 지능형 로더"""
+    """인코딩 및 상단 빈 줄 자동 감지 로더"""
     for enc in ['cp949', 'utf-8-sig', 'utf-8']:
         try:
             file.seek(0)
             df = pd.read_csv(file, encoding=enc)
             if df.columns.str.contains('Unnamed').sum() > len(df.columns) * 0.4:
-                for i in range(1, 5):
+                for i in range(1, 6):
                     file.seek(0)
                     df = pd.read_csv(file, skiprows=i, encoding=enc)
                     if not df.columns.str.contains('Unnamed').all(): break
@@ -31,31 +38,25 @@ def smart_load_csv(file):
         except: continue
     return None
 
-# --- [3. 상세 팝업 (Drill-down)] ---
+# --- [3. 상세 팝업창] ---
 @st.dialog("현장별 상세 수주 내역")
 def show_detail_popup(group_ids, df_bl):
     st.write(f"🔎 분석 품번 그룹: {', '.join(group_ids)}")
-    # 수주 데이터에서 해당 그룹 추출
     code_col = '상품코드' if '상품코드' in df_bl.columns else df_bl.columns[5]
     detail = df_bl[df_bl[code_col].astype(str).isin(group_ids)].copy()
-    
     if detail.empty:
         st.info("수주 데이터가 없습니다.")
         return
-
-    st.dataframe(detail.sort_values(detail.columns[24] if len(detail.columns)>24 else detail.columns[-1]), 
-                 use_container_width=True, hide_index=True)
+    st.dataframe(detail.sort_values('dt_clean', ascending=True), use_container_width=True, hide_index=True)
 
 # --- [4. 메인 UI] ---
-st.title("🚀 P·Forecast Stock Manager v3.0")
+st.title("🚀 P·Forecast Stock Manager v3.5")
 
-# 설정 영역
 with st.sidebar:
     st.header("⚙️ 분석 설정")
-    start_date = st.date_input("검토 시작일", datetime.now())
+    # 사용자가 설정한 날짜부터 조회 시작
+    start_date = st.date_input("검토 시점(조회 시작일)", datetime.now())
     freq_opt = st.selectbox("집계 단위", ["주별", "월별", "분기별", "년도별"], index=1)
-    freq_map = {"주별": "W", "월별": "MS", "분기별": "QS", "년도별": "YS"}
-    
     st.markdown("---")
     uploaded_files = st.file_uploader("5종 CSV 파일 업로드", accept_multiple_files=True)
 
@@ -76,120 +77,109 @@ if uploaded_files:
             for k, v in RECOGNITION.items():
                 if any(key in cols for key in v): data[k] = df; break
 
-# 사이드바 상태 표시
 with st.sidebar:
     for k, v in RECOGNITION.items():
-        if k in data: st.success(f"✅ {k}")
-        else: st.error(f"❌ {k}")
+        st.write(f"{'✅' if k in data else '❌'} {v[0]}")
 
 # --- [5. 메인 분석 로직] ---
 if len(data) >= 5:
-    with st.spinner('매트릭스를 생성 중입니다...'):
+    with st.spinner('데이터를 집계 중입니다...'):
         df_item, df_bl, df_po, df_st, df_retail = data['item'], data['backlog'], data['po'], data['stock'], data['retail']
         
-        # 1. 컬럼 매핑 및 정제
+        # 1. 데이터 정제 및 날짜 엔진 적용
         bl_code = '상품코드' if '상품코드' in df_bl.columns else df_bl.columns[5]
         bl_date = '납품예정일' if '납품예정일' in df_bl.columns else df_bl.columns[24]
-        df_bl['수주잔량'] = clean_numeric(df_bl['수주잔량'])
-        df_bl['dt'] = pd.to_datetime(df_bl[bl_date], errors='coerce')
+        df_bl['clean_qty'] = clean_numeric(df_bl['수주잔량'])
+        df_bl['dt_clean'] = parse_date_smart(df_bl[bl_date])
 
         po_code = '품번' if '품번' in df_po.columns else df_po.columns[12]
         po_date = '입고요청일' if '입고요청일' in df_po.columns else 'PO일자'
-        df_po['PO잔량(미선적)'] = clean_numeric(df_po['PO잔량(미선적)'])
-        df_po['dt'] = pd.to_datetime(df_po[po_date], errors='coerce')
+        df_po['clean_qty'] = clean_numeric(df_po['PO잔량(미선적)'])
+        df_po['dt_clean'] = parse_date_smart(df_po[po_date])
 
         st_code = '품번' if '품번' in df_st.columns else df_st.columns[7]
         st_qty = '재고수량' if '재고수량' in df_st.columns else df_st.columns[17]
-        df_st[st_qty] = clean_numeric(df_st[st_qty])
+        df_st['clean_qty'] = clean_numeric(df_st[st_qty])
 
-        # 2. 기간 축 생성
-        base_dt = datetime(start_date.year, start_date.month, start_date.day)
-        date_range = pd.date_range(start=base_dt, periods=12, freq=freq_map[freq_opt])
-        time_cols = [d.strftime('%Y-%m-%d' if freq_opt=="주별" else '%Y-%m') for d in date_range]
+        # 2. 동적 기간 축 생성 (조회 시작일부터)
+        base_dt = pd.Timestamp(start_date)
+        freq_map = {"주별": "W", "월별": "MS", "분기별": "QS", "년도별": "YS"}
+        date_range = pd.date_range(start=base_dt, periods=13, freq=freq_map[freq_opt])
+        
+        time_labels = []
+        for i in range(12):
+            d = date_range[i]
+            if freq_opt == "월별": label = d.strftime('%Y-%m')
+            elif freq_opt == "분기별": label = f"{d.year}-{((d.month-1)//3)+1}Q"
+            elif freq_opt == "년도별": label = f"{d.year}년"
+            else: label = d.strftime('%m/%d')
+            time_labels.append(label)
 
-        # 3. 품번 그룹별 루프
-        target_ids = df_bl[df_bl['수주잔량'] > 0][bl_code].unique()
+        # 3. 행렬 연산
+        target_ids = df_bl[df_bl['clean_qty'] > 0][bl_code].unique()
         matrix_rows = []
-        idx_counter = 1
+        idx = 1
 
         for pid in target_ids:
             pid_s = str(pid)
-            # 이전/변경 품번 정보 가져오기
             item_info = df_item[df_item['상품코드'].astype(str) == pid_s]
-            prev_id = str(item_info['이전상품코드'].iloc[0]) if not item_info.empty and pd.notnull(item_info['이전상품코드'].iloc[0]) else "-"
-            next_id = str(item_info['변경상품코드'].iloc[0]) if not item_info.empty and pd.notnull(item_info['변경상품코드'].iloc[0]) else "-"
-            group = list(set([pid_s, prev_id, next_id]))
-            group = [g for g in group if g != "-"]
+            prev = str(item_info['이전상품코드'].iloc[0]) if not item_info.empty else "-"
+            chng = str(item_info['변경상품코드'].iloc[0]) if not item_info.empty else "-"
+            group = list(set([pid_s, prev, chng])); group = [g for g in group if g not in ["-", "nan"]]
             
-            # 생산지 및 LT
             site = str(item_info['최종생산지명'].iloc[0]) if not item_info.empty else "ETC"
             lt = LT_MASTER.get(site[:2].upper(), 0)
 
-            # [재고 열 데이터 산출]
-            main_stock = df_st[df_st[st_code].astype(str).isin(group)][st_qty].sum()
-            po_kg = df_po[df_po[po_code].astype(str).isin(group)]['PO잔량(미선적)'].sum()
-            po_m = (po_kg * 1000) / (70 * 1.26) # PO 잔량 m 환산
+            # 재고 전용 컬럼 데이터
+            main_stk = df_st[df_st[st_code].astype(str).isin(group)]['clean_qty'].sum()
+            po_kg = df_po[df_po[po_code].astype(str).isin(group)]['clean_qty'].sum()
+            po_m = (po_kg * 1000) / (70 * 1.26)
 
-            # [수지 전개]
-            overdue_dem = df_bl[(df_bl[bl_code].astype(str).isin(group)) & (df_bl['dt'] < base_dt)]['수주잔량'].sum()
-            running_inv = main_stock - overdue_dem
+            # 수지 전개
+            overdue_dem = df_bl[(df_bl[bl_code].astype(str).isin(group)) & (df_bl['dt_clean'] < base_dt)]['clean_qty'].sum()
+            running_inv = main_stk - overdue_dem
             
-            row1_vals = {"납기경과": overdue_dem}
-            row2_vals = {"납기경과": running_inv}
+            d_vals, s_vals = {"납기경과": overdue_dem}, {"납기경과": running_inv}
 
-            for i, d in enumerate(date_range):
-                col_name = time_cols[i]
-                next_d = date_range[i+1] if i+1 < len(date_range) else d + pd.DateOffset(years=1)
-                
-                # 해당 기간 소요량
-                m_dem = df_bl[(df_bl[bl_code].astype(str).isin(group)) & (df_bl['dt'] >= d) & (df_bl['dt'] < next_d)]['수주잔량'].sum()
-                
-                # 해당 기간 PO 입고량
-                m_po_df = df_po[(df_po[po_code].astype(str).isin(group)) & (df_po['dt'] >= d) & (df_po['dt'] < next_d)]
-                m_sup = sum([(r['PO잔량(미선적)'] * 1000) / (70 * 1.26) for _, r in m_po_df.iterrows()])
+            for i in range(12):
+                start, end = date_range[i], date_range[i+1]
+                m_dem = df_bl[(df_bl[bl_code].astype(str).isin(group)) & (df_bl['dt_clean'] >= start) & (df_bl['dt_clean'] < end)]['clean_qty'].sum()
+                m_po_df = df_po[(df_po[po_code].astype(str).isin(group)) & (df_po['dt_clean'] >= start) & (df_po['dt_clean'] < end)]
+                m_sup = sum([(r['clean_qty'] * 1000) / (70 * 1.26) for _, r in m_po_df.iterrows()])
                 
                 running_inv = (running_inv + m_sup) - m_dem
-                row1_vals[col_name] = round(m_dem, 0)
-                row2_vals[col_name] = round(running_inv, 0)
+                d_vals[time_labels[i]] = round(m_dem, 0)
+                s_vals[time_labels[i]] = round(running_inv, 0)
 
-            # 공통 데이터
-            common = {"No": idx_counter, "수주품번": pid_s, "본사재고(m)": round(main_stock, 0), "PO잔량(m)": round(po_m, 0), "생산지": f"{site}({lt}M)", "group": group}
-            
-            # 1행: 소요량 줄
-            matrix_rows.append({**common, "구분": "소요량", "연계품번": f"이전:{prev_id}", **row1_vals})
-            # 2행: 예상재고 줄
-            matrix_rows.append({**common, "구분": "예상재고", "연계품번": f"변경:{next_id}", **row2_vals})
-            
-            idx_counter += 1
+            # UI용 데이터 구성 (No 통합, 품번은 한 번만)
+            common = {"No": idx, "수주품번": pid_s, "본사재고": round(main_stk, 0), "PO잔량(m)": round(po_m, 0), "생산지": f"{site}({lt}M)", "group": group}
+            matrix_rows.append({**common, "구분": "소요량", "연계정보": f"이전: {prev}", **d_vals})
+            matrix_rows.append({"No": "", "수주품번": "", "본사재고": "", "PO잔량(m)": "", "생산지": "", "group": group, "구분": "예상재고", "연계정보": f"변경: {chng}", **s_vals})
+            idx += 1
 
     if matrix_rows:
         res_df = pd.DataFrame(matrix_rows)
         
-        def style_matrix(row):
+        def style_fn(row):
             styles = [''] * len(row)
             if row['구분'] == "예상재고":
                 for i, col in enumerate(row.index):
-                    if (col == "납기경과" or col in time_cols) and isinstance(row[col], (int, float)) and row[col] < 0:
+                    if (col == "납기경과" or col in time_labels) and isinstance(row[col], (int, float)) and row[col] < 0:
                         styles[i] = 'background-color: #ff4b4b; color: white'
             return styles
 
-        st.subheader(f"📊 수급 분석 매트릭스 ({freq_opt} 기준)")
+        st.subheader(f"📊 수급 분석 매트릭스 ({freq_opt} 합산)")
         
-        # [수정] selection_mode="single-row" (하이픈 사용)
-        try:
-            sel = st.dataframe(
-                res_df.style.apply(style_matrix, axis=1),
-                use_container_width=True, hide_index=True,
-                column_order=["No", "수주품번", "구분", "연계품번", "본사재고(m)", "PO잔량(m)", "생산지", "납기경과"] + time_cols,
-                on_select="rerun", selection_mode="single-row"
-            )
+        sel = st.dataframe(
+            res_df.style.apply(style_fn, axis=1),
+            use_container_width=True, hide_index=True,
+            column_order=["No", "수주품번", "구분", "연계정보", "본사재고", "PO잔량(m)", "생산지", "납기경과"] + time_labels,
+            on_select="rerun", selection_mode="single-row"
+        )
 
-            if sel.selection.rows:
-                sel_idx = sel.selection.rows[0]
-                if st.button(f"🔍 {res_df.iloc[sel_idx]['수주품번']} 상세 내역 팝업"):
-                    show_detail_popup(res_df.iloc[sel_idx]['group'], df_bl)
-        except Exception as e:
-            st.dataframe(res_df.style.apply(style_matrix, axis=1), use_container_width=True, hide_index=True)
-            st.error(f"UI 오류: {e}")
+        if sel.selection.rows:
+            sel_idx = sel.selection.rows[0]
+            if st.button(f"🔍 {res_df.iloc[sel_idx if res_df.iloc[sel_idx]['수주품번'] != '' else sel_idx-1]['수주품번']} 상세 보기"):
+                show_detail_popup(res_df.iloc[sel_idx]['group'], df_bl)
 else:
-    st.info("사이드바에서 5종 파일을 업로드하면 분석이 시작됩니다.")
+    st.info("사이드바에 5종 파일을 모두 업로드해주세요.")
